@@ -1053,25 +1053,38 @@ public class ActivityTaskSupervisor implements RecentTasks.Callbacks {
         }
     }
 
+    /**
+     * 负责决定是直接启动已有进程中的 Activity，还是需要先创建新进程
+     * @param r
+     * @param andResume
+     * @param checkConfig
+     */
     void startSpecificActivity(ActivityRecord r, boolean andResume, boolean checkConfig) {
-        // Is this activity's application already running?
+        // 进程控制器，封装了进程状态信息
+        // 通过进程名和 UID 唯一标识一个应用进程
+        // 包含进程是否已启动、是否有主线程等信息
         final WindowProcessController wpc =
                 mService.getProcessController(r.processName, r.info.applicationInfo.uid);
 
         boolean knownToBeDead = false;
+        //进程已存在且正常的情况,进程存在且有主线程（hasThread() 表示进程已启动）
         if (wpc != null && wpc.hasThread()) {
             try {
+                //尝试直接启动 Activity（realStartActivityLocked）
                 realStartActivityLocked(r, wpc, andResume, checkConfig);
                 return;
             } catch (RemoteException e) {
                 Slog.w(TAG, "Exception when starting activity "
                         + r.intent.getComponent().flattenToShortString(), e);
+                //如果启动过程中抛出 RemoteException（通常是进程死亡）
             }
 
             // If a dead object exception was thrown -- fall through to
             // restart the application.
+            //标记进程已死（knownToBeDead = true）
             knownToBeDead = true;
             // Remove the process record so it won't be considered as alive.
+            // 清理死进程记录
             mService.mProcessNames.remove(wpc.mName, wpc.mUid);
             mService.mProcessMap.remove(wpc.getPid());
         } else if (r.intent.isSandboxActivity(mService.mContext)) {
@@ -1079,11 +1092,15 @@ public class ActivityTaskSupervisor implements RecentTasks.Callbacks {
             r.finishIfPossible("No sandbox process for the activity", false /* oomAdj */);
             r.launchFailed = true;
             r.detachFromProcess();
+            //沙箱 Activity：运行在隔离环境中的特殊 Activity（如 WebView 沙箱、安全支付环境）
+            //失败处理：如果没有沙箱进程可用，直接终止 Activity
+            //状态清理：标记启动失败，从进程中分离
             return;
         }
 
         r.notifyUnknownVisibilityLaunchedForKeyguardTransition();
 
+        //不阻塞主线程，通过 startProcessAsync 异步创建进程
         final boolean isTop = andResume && r.isTopRunningActivity();
         mService.startProcessAsync(r, knownToBeDead, isTop,
                 isTop ? HostingRecord.HOSTING_TYPE_TOP_ACTIVITY

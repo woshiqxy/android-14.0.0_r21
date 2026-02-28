@@ -1183,15 +1183,27 @@ class TaskFragment extends WindowContainer<WindowContainer> {
         }
     }
 
+    /**
+     * Activity 恢复流程中最核心、最复杂的部分，负责实际执行 Activity 的恢复操作
+     * 负责恢复该 Fragment 中的顶部 Activity。它处理了各种边界条件、状态检查、暂停现有 Activity、启动新 Activity 等复杂逻辑
+     * @param prev
+     * @param options
+     * @param skipPause
+     * @return
+     */
     final boolean resumeTopActivity(ActivityRecord prev, ActivityOptions options,
             boolean skipPause) {
+        //获取目标 Activity：当前 TaskFragment 中可聚焦的顶部 Activity
         ActivityRecord next = topRunningActivity(true /* focusableOnly */);
+        //兼容性检查：确保 Activity 兼容当前系统状态（如屏幕大小、配置等）
         if (next == null || !next.canResumeByCompat()) {
             return false;
         }
-
+        //清除延迟恢复标志：防止之前的延迟恢复状态影响本次操作
         next.delayedResume = false;
-
+        //暂停状态检查
+        //等待暂停完成：如果有 Activity 正在暂停，必须等待
+        //同步机制：确保所有暂停操作完成后才能继续
         if (!skipPause && !mRootWindowContainer.allPausedActivitiesComplete()) {
             // If we aren't skipping pause, then we have to wait for currently pausing activities.
             ProtoLog.v(WM_DEBUG_STATES, "resumeTopActivity: Skip resume: some activity pausing.");
@@ -1199,10 +1211,11 @@ class TaskFragment extends WindowContainer<WindowContainer> {
         }
 
         final TaskDisplayArea taskDisplayArea = getDisplayArea();
-        // If the top activity is the resumed one, nothing to do.
+        // 短路优化：如果目标 Activity 已经处于恢复状态，直接更新可见性和过渡动画
+        //多窗口焦点处理：在分屏等场景下确保正确的焦点设置
         if (mResumedActivity == next && next.isState(RESUMED)
                 && taskDisplayArea.allResumedActivitiesComplete()) {
-            // Ensure the visibility gets updated before execute app transition.
+            // 确保可见性更新
             taskDisplayArea.ensureActivitiesVisible(null /* starting */, 0 /* configChanges */,
                     false /* preserveWindows */, true /* notifyClients */);
             // Make sure we have executed any pending transitions, since there
@@ -1212,6 +1225,7 @@ class TaskFragment extends WindowContainer<WindowContainer> {
             // In a multi-resumed environment, like in a freeform device, the top
             // activity can be resumed, but it might not be the focused app.
             // Set focused app when top activity is resumed
+            // 多窗口模式下设置焦点
             if (taskDisplayArea.inMultiWindowMode() && taskDisplayArea.mDisplayContent != null
                     && taskDisplayArea.mDisplayContent.mFocusedApp != next) {
                 taskDisplayArea.mDisplayContent.setFocusedApp(next);
@@ -1221,8 +1235,8 @@ class TaskFragment extends WindowContainer<WindowContainer> {
             return false;
         }
 
-        // If we are sleeping, and there is no resumed activity, and the top activity is paused,
-        // well that is the state we want.
+        // 休眠状态处理,系统休眠：如果系统正在休眠且目标 Activity 已暂停，保持该状态
+        // 避免不必要的恢复：节省电量，提高响应速度
         if (mLastPausedActivity == next && shouldSleepOrShutDownActivities()) {
             // Make sure we have executed any pending transitions, since there
             // should be nothing left to do at this point.
@@ -1235,6 +1249,8 @@ class TaskFragment extends WindowContainer<WindowContainer> {
         // Make sure that the user who owns this activity is started.  If not,
         // we will just leave it as is because someone should be bringing
         // another user's activities to the top of the stack.
+        // 用户状态检查 多用户支持：确保目标 Activity 所属用户已启动
+        // 安全性：防止跨用户操作导致的权限问题
         if (!mAtmService.mAmInternal.hasStartedUserState(next.mUserId)) {
             Slog.w(TAG, "Skipping resume of top activity " + next
                     + ": user " + next.mUserId + " is stopped");
@@ -1257,7 +1273,7 @@ class TaskFragment extends WindowContainer<WindowContainer> {
             // it isn't null.
             lastResumed = lastFocusedRootTask.getTopResumedActivity();
         }
-
+        //暂停后台任务：暂停所有非目标 Activity
         boolean pausing = !skipPause && taskDisplayArea.pauseBackTasks(next);
         if (mResumedActivity != null) {
             ProtoLog.d(WM_DEBUG_STATES, "resumeTopActivity: Pausing %s", mResumedActivity);
@@ -1271,6 +1287,7 @@ class TaskFragment extends WindowContainer<WindowContainer> {
             // at the top of the LRU list, since we know we will be needing it
             // very soon and it would be a waste to let it get killed if it
             // happens to be sitting towards the end.
+            // 提前启动目标 Activity 的进程,提前启动进程：在等待暂停期间提前启动目标 Activity 的进程
             if (next.attachedToProcess()) {
                 next.app.updateProcessInfo(false /* updateServiceConnectionActivities */,
                         true /* activityChange */, false /* updateOomAdj */,
@@ -1356,9 +1373,9 @@ class TaskFragment extends WindowContainer<WindowContainer> {
                 }
                 if (mTaskSupervisor.mNoAnimActivities.contains(prev)) {
                     anim = false;
-                    dc.prepareAppTransition(TRANSIT_NONE);
+                    dc.prepareAppTransition(TRANSIT_NONE); // 关闭动画
                 } else {
-                    dc.prepareAppTransition(TRANSIT_CLOSE);
+                    dc.prepareAppTransition(TRANSIT_CLOSE);  // 打开动画
                 }
                 prev.setVisibility(false);
             } else {
@@ -1406,8 +1423,8 @@ class TaskFragment extends WindowContainer<WindowContainer> {
             // TRANSIT_WALLPAPER_OPEN animation, and run some funny animation.
             final boolean lastActivityTranslucent = inMultiWindowMode()
                     || mLastPausedActivity != null && !mLastPausedActivity.occludesParent();
-
-            // This activity is now becoming visible.
+            // 处理 Activity 已有进程的情况：
+            // 确保可见性：使 Activity 的窗口可见,处理透明 Activity：特殊处理透明 Activity 的场景
             if (!next.isVisibleRequested() || next.mAppStopped || lastActivityTranslucent) {
                 next.app.addToPendingTop();
                 next.setVisibility(true);
@@ -1425,6 +1442,7 @@ class TaskFragment extends WindowContainer<WindowContainer> {
 
             ProtoLog.v(WM_DEBUG_STATES, "Moving to RESUMED: %s (in existing)", next);
 
+            //将 Activity 状态设置为 RESUMED,生命周期推进：触发后续的生命周期回调
             next.setState(RESUMED, "resumeTopActivity");
 
             // Have the window manager re-evaluate the orientation of
@@ -1455,8 +1473,10 @@ class TaskFragment extends WindowContainer<WindowContainer> {
                 ActivityRecord nextNext = topRunningActivity();
                 ProtoLog.i(WM_DEBUG_STATES, "Activity config changed during resume: "
                         + "%s, new next: %s", next, nextNext);
+                //配置同步：确保 Activity 的配置与系统一致
+                //处理配置变化：如果配置变化导致 Activity 重启，重新调度
                 if (nextNext != next) {
-                    // Do over!
+                    // 配置变化导致新 Activity 启动
                     mTaskSupervisor.scheduleResumeTopActivities();
                 }
                 if (!next.isVisibleRequested() || next.mAppStopped) {
@@ -1471,6 +1491,7 @@ class TaskFragment extends WindowContainer<WindowContainer> {
                         ClientTransaction.obtain(next.app.getThread(), next.token);
                 // Deliver all pending results.
                 ArrayList<ResultInfo> a = next.results;
+                //客户端事务构建,添加结果传递
                 if (a != null) {
                     final int size = a.size();
                     if (!next.finishing && size > 0) {
@@ -1480,7 +1501,7 @@ class TaskFragment extends WindowContainer<WindowContainer> {
                         transaction.addCallback(ActivityResultItem.obtain(a));
                     }
                 }
-
+                // 添加新 Intent
                 if (next.newIntents != null) {
                     transaction.addCallback(
                             NewIntentItem.obtain(next.newIntents, true /* resume */));
@@ -1496,6 +1517,7 @@ class TaskFragment extends WindowContainer<WindowContainer> {
                 mAtmService.getAppWarningsLocked().onResumeActivity(next);
                 next.app.setPendingUiCleanAndForceProcessStateUpTo(mAtmService.mTopProcessState);
                 next.abortAndClearOptionsAnimation();
+                //// 设置生命周期请求
                 transaction.setLifecycleStateRequest(
                         ResumeActivityItem.obtain(next.app.getReportedProcState(),
                                 dc.isNextTransitionForward(), next.shouldSendCompatFakeFocus()));
@@ -1514,12 +1536,15 @@ class TaskFragment extends WindowContainer<WindowContainer> {
                 }
 
                 Slog.i(TAG, "Restarting because process died: " + next);
+                //启动新进程（Activity 无进程）
                 if (!next.hasBeenLaunched) {
                     next.hasBeenLaunched = true;
                 } else if (SHOW_APP_STARTING_PREVIEW && lastFocusedRootTask != null
                         && lastFocusedRootTask.isTopRootTaskInDisplayArea()) {
+                    //显示启动窗口提升用户体验
                     next.showStartingWindow(false /* taskSwitch */);
                 }
+                //异步启动 Activity 进程
                 mTaskSupervisor.startSpecificActivity(next, true, false);
                 return true;
             }

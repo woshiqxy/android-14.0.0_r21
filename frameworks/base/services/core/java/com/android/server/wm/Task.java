@@ -5048,11 +5048,17 @@ class Task extends TaskFragment {
     @GuardedBy("mService")
     private boolean resumeTopActivityInnerLocked(ActivityRecord prev, ActivityOptions options,
             boolean deferPause) {
+        //确保系统已启动完成
+        //系统正在启动或未启动时，不允许恢复 Activity
+        //避免在系统未准备好时出现异常
         if (!mAtmService.isBooting() && !mAtmService.isBooted()) {
             // Not ready yet!
             return false;
         }
 
+        //获取当前任务栈中可聚焦的顶部 Activity
+        //如果为空，说明当前任务没有 Activity 了
+        //调用 resumeNextFocusableActivityWhenRootTaskIsEmpty 寻找其他可恢复的任务
         final ActivityRecord topActivity = topRunningActivity(true /* focusableOnly */);
         if (topActivity == null) {
             // There are no activities left in this task, let's look somewhere else.
@@ -5060,8 +5066,10 @@ class Task extends TaskFragment {
         }
 
         final boolean[] resumed = new boolean[1];
+        //获取顶部 Activity 所在的 TaskFragment,先恢复最顶部的 Activity
         final TaskFragment topFragment = topActivity.getTaskFragment();
         resumed[0] = topFragment.resumeTopActivity(prev, options, deferPause);
+        //遍历恢复其他可恢复的 TaskFragment
         forAllLeafTaskFragments(f -> {
             if (topFragment == f) {
                 return;

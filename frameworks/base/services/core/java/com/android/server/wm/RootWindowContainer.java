@@ -2286,17 +2286,25 @@ class RootWindowContainer extends WindowContainer<DisplayContent>
     boolean resumeFocusedTasksTopActivities(
             Task targetRootTask, ActivityRecord target, ActivityOptions targetOptions,
             boolean deferPause) {
+        //系统是否已就绪（systemReady）,是否处于关机状态,是否正在进行其他关键操作.目的：确保在合适的时机恢复 Activity
         if (!mTaskSupervisor.readyToResume()) {
             return false;
         }
 
         boolean result = false;
+        //恢复目标任务
+        //targetRootTask.isTopRootTaskInDisplayArea()：目标是显示区域顶部的任务
+        //getTopDisplayFocusedRootTask() == targetRootTask：目标是当前聚焦的任务
         if (targetRootTask != null && (targetRootTask.isTopRootTaskInDisplayArea()
                 || getTopDisplayFocusedRootTask() == targetRootTask)) {
+            //调用 resumeTopActivityUncheckedLocked() 实际恢复目标任务的顶部 Activity
+            //这是递归入口，会处理暂停当前 Activity、启动目标 Activity 等
             result = targetRootTask.resumeTopActivityUncheckedLocked(target, targetOptions,
                     deferPause);
         }
-
+        //遍历所有显示屏上的所有任务
+        //遍历顺序：从顶层显示屏向下遍历（getChildCount() - 1 到 0）
+        //目的：确保所有显示屏上都有 Activity 处于恢复状态
         for (int displayNdx = getChildCount() - 1; displayNdx >= 0; --displayNdx) {
             final DisplayContent display = getChildAt(displayNdx);
             final boolean curResult = result;
