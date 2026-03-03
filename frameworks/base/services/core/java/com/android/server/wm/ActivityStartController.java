@@ -164,43 +164,58 @@ public class ActivityStartController {
         mLastStarter.postStartActivityProcessing(r, result, targetRootTask);
     }
 
+    /**
+     * @param intent 启动Home的Intent
+     * @param aInfo 活动信息（ActivityInfo）
+     * @param reason 动原因（用于日志和调试）
+     * @param taskDisplayArea 任务显示区域（Android 12+引入的新概念）
+     */
     void startHomeActivity(Intent intent, ActivityInfo aInfo, String reason,
             TaskDisplayArea taskDisplayArea) {
+        //配置 ActivityOptions（启动选项）,创建基本的ActivityOptions
         final ActivityOptions options = ActivityOptions.makeBasic();
+        //设置窗口模式为全屏
         options.setLaunchWindowingMode(WINDOWING_MODE_FULLSCREEN);
+        //如果 不是 Resolver Activity（如“选择默认Launcher”的弹窗），则标记为 HOME 类型。
+        //Resolver Activity 不应放在根任务中，而是应覆盖在当前前台 Activity 之上。
         if (!ActivityRecord.isResolverActivity(aInfo.name)) {
             // The resolver activity shouldn't be put in root home task because when the
             // foreground is standard type activity, the resolver activity should be put on the
             // top of current foreground instead of bring root home task to front.
-            options.setLaunchActivityType(ACTIVITY_TYPE_HOME);
+            options.setLaunchActivityType(ACTIVITY_TYPE_HOME);// 设置为 HOME 类型
         }
+        //设置启动显示区域（Display & TaskDisplayArea）
+        //确定 Home Activity 在哪个物理显示器上启动（如手机主屏、折叠屏副屏）。
         final int displayId = taskDisplayArea.getDisplayId();
-        options.setLaunchDisplayId(displayId);
+        options.setLaunchDisplayId(displayId);// 指定显示器 ID（如主屏幕、副屏幕）
         options.setLaunchTaskDisplayArea(taskDisplayArea.mRemoteToken
-                .toWindowContainerToken());
+                .toWindowContainerToken());//mRemoteToken 是一个 IBinder，用于跨进程通信（Binder IPC）
 
         // The home activity will be started later, defer resuming to avoid unnecessary operations
         // (e.g. start home recursively) when creating root home task.
+        //延迟 Resume（避免递归启动）
         mSupervisor.beginDeferResume();
         final Task rootHomeTask;
         try {
             // Make sure root home task exists on display area.
-            rootHomeTask = taskDisplayArea.getOrCreateRootHomeTask(ON_TOP);
+            rootHomeTask = taskDisplayArea.getOrCreateRootHomeTask(ON_TOP);// 创建/获取根 Home 任务
         } finally {
-            mSupervisor.endDeferResume();
+            mSupervisor.endDeferResume();// 恢复 Resume
         }
-
+        //启动 Home Activity
         mLastHomeActivityStartResult = obtainStarter(intent, "startHomeActivity: " + reason)
-                .setOutActivity(tmpOutRecord)
-                .setCallingUid(0)
-                .setActivityInfo(aInfo)
-                .setActivityOptions(options.toBundle())
-                .execute();
+                .setOutActivity(tmpOutRecord)// 输出启动后的 ActivityRecord
+                .setCallingUid(0)// 系统调用（UID=0，即 root）
+                .setActivityInfo(aInfo)// Home Activity 的元数据
+                .setActivityOptions(options.toBundle()) // 启动选项
+                .execute();// 执行启动
         mLastHomeActivityStartRecord = tmpOutRecord[0];
+        //处理 Resume 逻辑（避免卡顿）,如果 根 Home 任务 已经在 Resume 阶段（如 Launcher 已经在前台），则需要 重新调度 Resume，以确保界面正常显示。
         if (rootHomeTask.mInResumeTopActivity) {
             // If we are in resume section already, home activity will be initialized, but not
             // resumed (to avoid recursive resume) and will stay that way until something pokes it
             // again. We need to schedule another resume.
+            //通知 ActivityStackSupervisor 重新检查 栈顶 Activity 是否需要 Resume。
             mSupervisor.scheduleResumeTopActivities();
         }
     }

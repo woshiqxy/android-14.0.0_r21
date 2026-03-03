@@ -680,25 +680,32 @@ class ActivityStarter {
      * Resolve necessary information according the request parameters provided earlier, and execute
      * the request which begin the journey of starting an activity.
      * @return The starter result.
+     * 该方法是整个 Activity 启动流程的“终点站”前的最后一道关卡。在此之前，参数已经解析（Intent, ComponentName 等），任务栈（Task）、窗口容器（WindowContainer）上下文也已准备好。此方法的主要职责是：
+     * 1. 安全与资源检查：防止文件描述符泄漏，校验调用者身份。
+     * 2. 延迟解析与死锁避免：在持有锁之外解析 ActivityInfo，避免 URI 权限检查导致的死锁。
+     * 3. 系统级意图审计：记录关机/重启请求的来源。
+     * 4. 核心启动执行：调用 executeRequest 真正触发 AMS/WMS 的逻辑交互。
+     * 5. 全局配置更新：如果需要切换 UI 配置（如多语言、夜间模式），在此处处理。
+     * 6. 性能指标上报：通知 Metrics 服务记录启动开始和启动结束的时间点（用于计算 App Startup Time）。
      */
     int execute() {
         try {
             onExecutionStarted();//前置检查与准备,启动开始的回调，用于性能统计.
-            // Refuse possible leaked file descriptors  文件描述符检查：防止通过Intent传递文件描述符导致的内存泄漏（安全机制）
+            //文件描述符检查：防止通过Intent传递文件描述符导致的内存泄漏（安全机制）。如果不禁止，可能导致恶意应用或泄露的应用窃取敏感文件句柄，造成资源耗尽攻击或数据泄露。
             if (mRequest.intent != null && mRequest.intent.hasFileDescriptors()) {
                 throw new IllegalArgumentException("File descriptors passed in Intent");
             }
 
             final LaunchingState launchingState;
-            synchronized (mService.mGlobalLock) {
+            synchronized (mService.mGlobalLock) {//这是 AMS/WMS 的全局锁。确保在读取调用者信息和发送指标时，内存数据结构（如 Task Stack）不会发生变更。
                 final ActivityRecord caller = ActivityRecord.forTokenLocked(mRequest.resultTo);//从token获取源Activity记录
+                // 如果是跨进程调用，realCallingUid 可能是假的（Binder 代理）。这里会还原真实的 UID（UID 分离原则），这对后台启动限制（Background Starts Limits）至关重要。
                 final int callingUid = mRequest.realCallingUid == Request.DEFAULT_REAL_CALLING_UID
                         ?  Binder.getCallingUid() : mRequest.realCallingUid;//确定真实的调用者UID（可能是跨进程调用）
+                //标志着“启动计时开始”。此时尚未启动目标 Activity，只是发出了请求。这对于分析用户感知上的“冷启动”时长非常关键。
                 launchingState = mSupervisor.getActivityMetricsLogger().notifyActivityLaunching(
                         mRequest.intent, caller, callingUid);//ActivityMetricsLogger 记录启动开始，返回 LaunchingState 用于后续统计
             }
-
-
 
             // 延迟解析：如果调用者没有提供 ActivityInfo，在这里通过PackageManager解析Intent
             // 避免死锁：注释说明如果在持有锁时解析URI权限可能导致死锁，所以放在锁外
@@ -708,6 +715,8 @@ class ActivityStarter {
 
             // 特殊处理：如果是关机(SHUTDOWN)/重启(REBOOT)Intent，记录检查点用于调试
             // 安全检查：记录哪个应用发起了关机请求
+            // 普通应用通常没有权限发起 SHUTDOWN 或 REBOOT。如果有应用尝试这样做（可能是恶意软件），系统必须记录下来
+            // 在日志中记录是哪个包触发了系统关机，方便排查异常重启或电池问题。
             if (mRequest.intent != null) {
                 String intentAction = mRequest.intent.getAction();
                 String callingPackage = mRequest.callingPackage;
@@ -730,8 +739,10 @@ class ActivityStarter {
                 ProtoLog.v(WM_DEBUG_CONFIGURATION, "Starting activity when config "
                         + "will change = %b", globalConfigWillChange);
 
+                //检查是否需要变更全局配置 (Config)
                 final long origId = Binder.clearCallingIdentity();
 
+                // 特殊场景处理：如浮窗、多窗口模式切换到全屏
                 res = resolveToHeavyWeightSwitcherIfNeeded();
                 if (res != START_SUCCESS) {
                     return res;
@@ -740,6 +751,7 @@ class ActivityStarter {
                 try {
                     res = executeRequest(mRequest);//真正的启动逻辑
                 } finally {
+                    // 记录返回码
                     mRequest.logMessage.append(" result code=").append(res);
                     Slog.i(TAG, mRequest.logMessage.toString());
                     mRequest.logMessage.setLength(0);
@@ -774,6 +786,7 @@ class ActivityStarter {
                 // Notify ActivityMetricsLogger that the activity has launched.
                 // ActivityMetricsLogger will then wait for the windows to be drawn and populate
                 // WaitResult.
+                // 通知指标服务：活动已发出
                 mSupervisor.getActivityMetricsLogger().notifyActivityLaunched(launchingState, res,
                         newActivityCreated, launchingRecord, originalOptions);
                 //如果需要等待结果，处理WaitResult
