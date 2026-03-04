@@ -1206,12 +1206,14 @@ class ActivityStarter {
         if (aInfo != null) {
             if (mService.getPackageManagerInternalLocked().isPermissionsReviewRequired(
                     aInfo.packageName, userId)) {
+                // 创建PendingIntent包装原始Intent
                 final IIntentSender target = mService.getIntentSenderLocked(
                         ActivityManager.INTENT_SENDER_ACTIVITY, callingPackage, callingFeatureId,
                         callingUid, userId, null, null, 0, new Intent[]{intent},
                         new String[]{resolvedType}, PendingIntent.FLAG_CANCEL_CURRENT
                                 | PendingIntent.FLAG_ONE_SHOT, null);// 需要权限审查，启动审查Activity
 
+                // 创建权限审查Intent
                 Intent newIntent = new Intent(Intent.ACTION_REVIEW_PERMISSIONS);
 
                 int flags = intent.getFlags();
@@ -1240,12 +1242,14 @@ class ActivityStarter {
 
                 // The permissions review target shouldn't get any permission
                 // grants intended for the original destination
+                // 审查Activity不获得权限
                 intentGrants = null;
 
                 resolvedType = null;
                 callingUid = realCallingUid;
                 callingPid = realCallingPid;
 
+                // 重新解析到审查Activity
                 rInfo = mSupervisor.resolveIntent(intent, resolvedType, userId, 0,
                         computeResolveFilterUid(
                                 callingUid, realCallingUid, request.filterCallingUid),

@@ -7920,6 +7920,12 @@ public final class ActivityThread extends ClientTransactionHandler
         System.exit(0);
     }
 
+    /**
+     * Android 应用进程初始化的核心步骤,扮演着将进程附着到系统服务并完成环境初始化的关键角色。
+     * 该方法根据 system 参数区分普通应用进程与系统进程，执行不同的初始化逻辑，同时注册全局配置变化监听器
+     * @param system
+     * @param startSeq
+     */
     @UnsupportedAppUsage
     private void attach(boolean system, long startSeq) {
         sCurrentActivityThread = this;
@@ -7930,14 +7936,18 @@ public final class ActivityThread extends ClientTransactionHandler
         if (!system) {
             android.ddm.DdmHandleAppName.setAppName("<pre-initialized>",
                                                     UserHandle.myUserId());
+            //RuntimeInit.setApplicationObject：将 mAppThread（ApplicationThread 实例，继承自 IApplicationThread.Stub）设置为进程的应用对象，使系统服务能通过 Binder 回调应用。
             RuntimeInit.setApplicationObject(mAppThread.asBinder());
             final IActivityManager mgr = ActivityManager.getService();
             try {
+                //向 AMS 注册当前应用进程
+                //AMS 会通过回调通知应用创建 Application、启动 Activity 等
                 mgr.attachApplication(mAppThread, startSeq);
             } catch (RemoteException ex) {
                 throw ex.rethrowFromSystemServer();
             }
             // Watch for getting close to heap limit.
+            //当 Dalvik 堆使用量超过最大堆的 3/4 时，通知 ActivityTaskManager 尝试释放一些不可见的 Activity（调用其 onStop 并允许回收内存）。
             BinderInternal.addGcWatcher(new Runnable() {
                 @Override public void run() {
                     if (!mSomeActivitiesChanged) {
@@ -7981,6 +7991,9 @@ public final class ActivityThread extends ClientTransactionHandler
             synchronized (mResourcesManager) {
                 // We need to apply this change to the resources immediately, because upon returning
                 // the view hierarchy will be informed about it.
+                //通过 ResourcesManager 应用新配置到所有资源对象。
+                //更新 ConfigurationController 中的 Locale 列表（支持 Android 14 的 每个应用可单独设置语言 特性）。
+                //若配置实际改变，发送 H.CONFIGURATION_CHANGED 消息，最终通知应用组件（如 Activity）执行 onConfigurationChanged。
                 if (mResourcesManager.applyConfigurationToResources(globalConfig,
                         null /* compat */)) {
                     mConfigurationController.updateLocaleListFromAppContext(
@@ -7996,6 +8009,7 @@ public final class ActivityThread extends ClientTransactionHandler
                 }
             }
         };
+        //向 ViewRootImpl 注册回调，当系统全局配置（如语言、字体、屏幕尺寸）改变时触发。
         ViewRootImpl.addConfigCallback(configChangedCallback);
     }
 
@@ -8196,7 +8210,13 @@ public final class ActivityThread extends ClientTransactionHandler
         }
     }
 
+    /**
+     * ActivityThread.main() 方法是 Android 应用程序进程的入口点，由 Zygote 进程孵化出应用进程后调用。
+     * 它运行在应用的主线程（UI 线程）中，负责初始化环境、准备主循环（Looper）并最终进入消息循环，使应用能够处理各种事件
+     * @param args
+     */
     public static void main(String[] args) {
+        //系统跟踪（System Trace）事件标签，目的是便于开发者和系统分析工具跟踪应用启动过程中的耗时，帮助优化启动性能。
         Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "ActivityThreadMain");
 
         // Install selective syscall interception
@@ -8207,6 +8227,8 @@ public final class ActivityThread extends ClientTransactionHandler
         // StrictMode) on debug builds, but using DropBox, not logs.
         CloseGuard.setEnabled(false);
 
+        //初始化当前用户的环境变量和目录结构。Android 是多用户系统（包括工作资料、访客模式等），此方法为当前用户（通过 UserHandle.myUserId() 获取）设置正确的存储路径。
+        //它会设定用户专属的目录，如 /data/user/<userId>/，确保后续文件操作指向正确的用户空间。Android 14 更新：随着多用户功能的增强（如更完善的资料隔离），此初始化可能涉及更多用户相关的配置。
         Environment.initForCurrentUser();
 
         // Make sure TrustedCertificateStore looks in the right place for CA certificates
