@@ -784,6 +784,9 @@ public class ActivityTaskSupervisor implements RecentTasks.Callbacks {
     boolean realStartActivityLocked(ActivityRecord r, WindowProcessController proc,
             boolean andResume, boolean checkConfig) throws RemoteException {
 
+        //检查：是否所有正在暂停的 Activity 都已完成暂停
+        //原因：Activity 的启动和暂停需要串行化处理，避免状态混乱
+        //结果：如果还有 Activity 在暂停中，暂时跳过本次启动
         if (!mRootWindowContainer.allPausedActivitiesComplete()) {
             // While there are activities pausing we skipping starting any new activities until
             // pauses are complete. NOTE: that we also do this for activities that are starting in
@@ -794,20 +797,25 @@ public class ActivityTaskSupervisor implements RecentTasks.Callbacks {
             return false;
         }
 
+        //获取 Task 信息：Activity 所属的 Task 和 RootTask
         final Task task = r.getTask();
         final Task rootTask = task.getRootTask();
 
+        //推迟 resume 操作，直到启动完成
         beginDeferResume();
         // The LaunchActivityItem also contains process configuration, so the configuration change
         // from WindowProcessController#setProcess can be deferred. The major reason is that if
         // the activity has FixedRotationAdjustments, it needs to be applied with configuration.
         // In general, this reduces a binder transaction if process configuration is changed.
+        //暂停配置分发，避免在启动过程中发生配置变化
         proc.pauseConfigurationDispatch();
 
         try {
+            //冻结屏幕，防止在启动过程中显示中间状态
             r.startFreezingScreenLocked(proc, 0);
 
             // schedule launch ticks to collect information about slow apps.
+            //启动启动计时器，用于检测慢启动的 Activity
             r.startLaunchTickingLocked();
             r.lastLaunchTime = SystemClock.uptimeMillis();
             r.setProcess(proc);
@@ -827,6 +835,7 @@ public class ActivityTaskSupervisor implements RecentTasks.Callbacks {
                 // Deferring resume here because we're going to launch new activity shortly.
                 // We don't want to perform a redundant launch of the same record while ensuring
                 // configurations and trying to resume top activity of focused root task.
+                //确保窗口管理器中的可见性和配置正确
                 mRootWindowContainer.ensureVisibilityAndConfig(r, r.getDisplayId(),
                         false /* markFrozenIfConfigChanged */, true /* deferResume */);
             }
@@ -841,6 +850,7 @@ public class ActivityTaskSupervisor implements RecentTasks.Callbacks {
 
             final int applicationInfoUid =
                     (r.info.applicationInfo != null) ? r.info.applicationInfo.uid : -1;
+            //Activity 的用户 ID 必须与进程的用户 ID 匹配
             if ((r.mUserId != proc.mUserId) || (r.info.applicationInfo.uid != applicationInfoUid)) {
                 Slog.wtf(TAG,
                         "User ID for activity changing for " + r
@@ -852,6 +862,7 @@ public class ActivityTaskSupervisor implements RecentTasks.Callbacks {
             // Send the controller to client if the process is the first time to launch activity.
             // So the client can save binder transactions of getting the controller from activity
             // task manager service.
+            //用于客户端与系统服务之间的双向通信（如 Activity 结果、生命周期回调）
             final IActivityClientController activityClientController =
                     proc.hasEverLaunchedActivity() ? null : mService.mActivityClientController;
             r.launchCount++;
@@ -913,6 +924,7 @@ public class ActivityTaskSupervisor implements RecentTasks.Callbacks {
                 }
 
                 // Create activity launch transaction.
+                //构建 ClientTransaction（核心）
                 final ClientTransaction clientTransaction = ClientTransaction.obtain(
                         proc.getThread(), r.token);
 
@@ -943,6 +955,8 @@ public class ActivityTaskSupervisor implements RecentTasks.Callbacks {
                 clientTransaction.setLifecycleStateRequest(lifecycleItem);
 
                 // Schedule transaction.
+                //发送事务到应用进程
+                //通过 Binder 调用应用进程的 scheduleTransaction 方法,应用进程处理：最终进入 ActivityThread 的 handleLaunchActivity
                 mService.getLifecycleManager().scheduleTransaction(clientTransaction);
 
                 if (procConfig.seq > mRootWindowContainer.getConfiguration().seq) {

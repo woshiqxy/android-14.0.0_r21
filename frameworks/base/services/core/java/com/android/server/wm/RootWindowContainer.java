@@ -164,7 +164,9 @@ import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
-/** Root {@link WindowContainer} for the device. */
+/** Root {@link WindowContainer} for the device.
+ *  窗口容器的根节点，管理所有 DisplayContent（屏幕显示内容）。
+ * */
 class RootWindowContainer extends WindowContainer<DisplayContent>
         implements DisplayManager.DisplayListener {
     private static final String TAG = TAG_WITH_CLASS_NAME ? "RootWindowContainer" : TAG_WM;
@@ -1842,9 +1844,16 @@ class RootWindowContainer extends WindowContainer<DisplayContent>
 
     /**
      * @see #ensureActivitiesVisible(ActivityRecord, int, boolean)
+     * 负责确保所有应该可见的 Activity 正确显示。当系统配置变化、窗口堆栈调整或 Activity 状态改变时，此方法会被调用来同步各个 Activity 的可见性状态。
+     * 调用场景：配置变化（如屏幕旋转、语言切换）、 Activity 启动/停止/销毁后、窗口堆栈调整（如分屏模式切换）、系统可见性状态需要同步时
+     * starting：正在启动的 ActivityRecord，可能为 null
+     * configChanges：发生的配置变化类型
+     * preserveWindows：是否保留现有窗口（通常为 false）
+     * notifyClients：是否通知客户端（应用进程）可见性变化
      */
     void ensureActivitiesVisible(ActivityRecord starting, int configChanges,
             boolean preserveWindows, boolean notifyClients) {
+        //递归保护机制
         if (mTaskSupervisor.inActivityVisibilityUpdate()
                 || mTaskSupervisor.isRootVisibilityUpdateDeferred()) {
             // Don't do recursive work.
@@ -1852,9 +1861,12 @@ class RootWindowContainer extends WindowContainer<DisplayContent>
         }
 
         try {
+            //设置一个标志位，标记当前正在执行可见性更新。这个标志就是第1步中检查的 inActivityVisibilityUpdate()
             mTaskSupervisor.beginActivityVisibilityUpdate();
             // First the front root tasks. In case any are not fullscreen and are in front of home.
+            // 遍历所有 DisplayContent
             for (int displayNdx = getChildCount() - 1; displayNdx >= 0; --displayNdx) {
+                //获取当前系统中的显示屏数量（可能包含主屏、外接屏、虚拟屏等）。
                 final DisplayContent display = getChildAt(displayNdx);
                 display.ensureActivitiesVisible(starting, configChanges, preserveWindows,
                         notifyClients);

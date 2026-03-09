@@ -4550,6 +4550,15 @@ public class ActivityManagerService extends IActivityManager.Stub
         }
     }
 
+    /**
+     * 负责处理应用进程通过 IApplicationThread.attachApplication 发起的附着请求。
+     * 当应用进程（由 Zygote 孵化）启动后，会调用 ActivityThread.attach，进而通过 Binder 调用 AMS 的此方法，
+     * 完成进程与应用记录的绑定、初始化信息的传递，并最终使应用进入可运行状态
+     * @param thread 应用进程的ApplicationThread Binder 接口
+     * @param pid 应用进程的 PID
+     * @param callingUid 调用方的 UID
+     * @param startSeq 进程启动序列号
+     */
     @GuardedBy("this")
     private void attachApplicationLocked(@NonNull IApplicationThread thread,
             int pid, int callingUid, long startSeq) {
@@ -4560,10 +4569,13 @@ public class ActivityManagerService extends IActivityManager.Stub
         ProcessRecord app;
         long startTime = SystemClock.uptimeMillis();
         long bindApplicationTimeMillis;
+        //MY_PID 是 AMS 自身进程的 PID，如果传入的 pid 等于 MY_PID（理论上不可能，因为 AMS 不会附着自己），则跳过。
         if (pid != MY_PID && pid >= 0) {
             synchronized (mPidsSelfLocked) {
+                //从 mPidsSelfLocked 映射中根据 pid 查找对应的 ProcessRecord。该映射以 PID 为键，保存了所有运行中进程的记录
                 app = mPidsSelfLocked.get(pid);
             }
+            // ... 验证 UID 和 startSeq 一致性,处理 PID 冲突与清理
             if (app != null && (app.getStartUid() != callingUid || app.getStartSeq() != startSeq)) {
                 String processName = null;
                 final ProcessRecord pending = mProcessList.mPendingStarts.get(startSeq);
@@ -4579,6 +4591,7 @@ public class ActivityManagerService extends IActivityManager.Stub
                 // SafetyNet logging for b/131105245.
                 EventLog.writeEvent(0x534e4554, "131105245", app.getStartUid(), msg);
                 // If there is already an app occupying that pid that hasn't been cleaned up
+                // 冲突处理：记录错误，清理旧的 ProcessRecord，并从映射中移除
                 cleanUpApplicationRecordLocked(app, pid, false, false, -1,
                         true /*replacingPid*/, false /* fromBinderDied */);
                 removePidLocked(pid, app);
@@ -4590,16 +4603,19 @@ public class ActivityManagerService extends IActivityManager.Stub
 
         // It's possible that process called attachApplication before we got a chance to
         // update the internal state.
+        //在 AMS 请求 Zygote 启动进程时，会创建 ProcessRecord 并放入 mPendingStarts 映射（键为 startSeq）。进程启动成功后，通过此映射将 PID 与记录关联
         if (app == null && startSeq > 0) {
             final ProcessRecord pending = mProcessList.mPendingStarts.get(startSeq);
             if (pending != null && pending.getStartUid() == callingUid
                     && pending.getStartSeq() == startSeq
+                    //将 pending 记录从挂起状态移至运行状态，设置 PID，并加入 mPidsSelfLocked。
                     && mProcessList.handleProcessStartedLocked(pending, pid,
                         pending.isUsingWrapper(), startSeq, true)) {
                 app = pending;
             }
         }
 
+        //若仍找不到有效记录，说明该进程的启动未被 AMS 记录（可能由于系统异常或恶意行为），直接杀死进程并返回。
         if (app == null) {
             Slog.w(TAG, "No pending application record for pid " + pid
                     + " (IApplicationThread " + thread + "); dropping process");
@@ -4621,6 +4637,7 @@ public class ActivityManagerService extends IActivityManager.Stub
 
         // If this application record is still attached to a previous
         // process, clean it up now.
+        //如果该 ProcessRecord 之前已关联过其他线程（如进程重启但记录未被清理），则先处理原进程死亡，确保状态一致。
         if (app.getThread() != null) {
             handleAppDiedLocked(app, pid, true, true, false /* fromBinderDied */);
         }
@@ -4632,6 +4649,7 @@ public class ActivityManagerService extends IActivityManager.Stub
 
         final String processName = app.processName;
         try {
+            //监听应用进程的 Binder 死亡通知，当进程异常终止时，AMS 能及时清理资源并调整调度。
             AppDeathRecipient adr = new AppDeathRecipient(
                     app, pid, thread);
             thread.asBinder().linkToDeath(adr, 0);
@@ -4646,6 +4664,7 @@ public class ActivityManagerService extends IActivityManager.Stub
 
         EventLogTags.writeAmProcBound(app.userId, pid, app.processName);
 
+        //初始化进程状态
         synchronized (mProcLock) {
             mOomAdjuster.setAttachingProcessStatesLSP(app);
             clearProcessForegroundLocked(app);
@@ -4658,6 +4677,10 @@ public class ActivityManagerService extends IActivityManager.Stub
             app.setUnlocked(StorageManager.isUserKeyUnlocked(app.userId));
         }
 
+        // 生成 ContentProvider 列表
+        // normalMode 指示系统是否已进入就绪状态（或允许该应用在启动时运行）。
+        // 若正常模式，则通过 mCpHelper 生成该应用需要发布的 ContentProvider 信息列表。
+        // 如果存在 provider 且应用处于“正在发布”的等待列表中，则设置 CONTENT_PROVIDER_PUBLISH_TIMEOUT_MSG 超时消息，防止 provider 发布过慢导致 ANR
         boolean normalMode = mProcessesReady || isAllowedWhileBooting(app.info);
         List<ProviderInfo> providers = normalMode
                                             ? mCpHelper.generateApplicationProvidersLocked(app)
@@ -4767,6 +4790,7 @@ public class ActivityManagerService extends IActivityManager.Stub
             if (mPlatformCompat != null) {
                 mPlatformCompat.resetReporting(app.info);
             }
+            //准备 bindApplication 参数
             final ProviderInfoList providerList = ProviderInfoList.fromList(providers);
             if (app.getIsolatedEntryPoint() != null) {
                 // This is an isolated process which should just call an entry point instead of
@@ -4774,6 +4798,7 @@ public class ActivityManagerService extends IActivityManager.Stub
                 thread.runIsolatedEntryPoint(
                         app.getIsolatedEntryPoint(), app.getIsolatedEntryPointArgs());
             } else if (instr2 != null) {
+                // 带 instrumentation
                 thread.bindApplication(processName, appInfo,
                         app.sdkSandboxClientAppVolumeUuid, app.sdkSandboxClientAppPackage,
                         providerList,
@@ -4803,6 +4828,7 @@ public class ActivityManagerService extends IActivityManager.Stub
                         app.getStartElapsedTime(), app.getStartUptime());
             }
 
+            //发送 BIND_APPLICATION_TIMEOUT_MSG 消息，若应用在规定时间内未完成绑定，则 AMS 会认为该进程启动失败并清理
             Message msg = mHandler.obtainMessage(BIND_APPLICATION_TIMEOUT_MSG);
             msg.obj = app;
             mHandler.sendMessageDelayed(msg, BIND_APPLICATION_TIMEOUT);
@@ -4847,6 +4873,7 @@ public class ActivityManagerService extends IActivityManager.Stub
             }
         } catch (Exception e) {
             // We need kill the process group here. (b/148588589)
+            //若 bindApplication 过程抛出异常（如远程异常），则记录错误、杀死进程并清理记录。
             Slog.wtf(TAG, "Exception thrown during bind of " + app, e);
             app.resetPackageList(mProcessStats);
             app.unlinkDeathRecipient();
@@ -4871,6 +4898,14 @@ public class ActivityManagerService extends IActivityManager.Stub
         }
     }
 
+    /**
+     * finishAttachApplicationInner 是 Android 系统服务（AMS）在应用进程完成 bindApplication 后调用的收尾方法。
+     * 它负责处理因等待该进程而挂起的四大组件请求（Activity、Service、BroadcastReceiver、Backup Agent），是连接应用初始化与组件启动的关键桥梁
+     * 验证进程合法性，并依次处理等待该进程的 Activity、Service、BroadcastReceiver 和 Backup Agent。
+     * @param startSeq  启动序列号
+     * @param uid       进程 UID
+     * @param pid       进程 PID
+     */
     private void finishAttachApplicationInner(long startSeq, int uid, int pid) {
         final long startTime = SystemClock.uptimeMillis();
         // Find the application record that is being attached...  either via
@@ -4886,6 +4921,7 @@ public class ActivityManagerService extends IActivityManager.Stub
         } else {
             Slog.wtf(TAG, "Mismatched or missing ProcessRecord: " + app + ". Pid: " + pid
                     + ". Uid: " + uid);
+            // 验证失败：记录错误，杀死进程，清理资源
             killProcess(pid);
             killProcessGroup(uid, pid);
             mProcessList.noteAppKill(pid, uid,
@@ -4901,6 +4937,7 @@ public class ActivityManagerService extends IActivityManager.Stub
 
         synchronized (this) {
             // Mark the finish attach application phase as completed
+            //将 ProcessRecord 的 pendingFinishAttach 标志设为 false，表示附着收尾阶段已开始执行。
             app.setPendingFinishAttach(false);
 
             final boolean normalMode = mProcessesReady || isAllowedWhileBooting(app.info);
@@ -4911,6 +4948,15 @@ public class ActivityManagerService extends IActivityManager.Stub
             // See if the top visible activity is waiting to run in this process...
             if (normalMode) {
                 try {
+                    //处理等待的 Activity（最核心的启动路径）
+                    //mAtmInternal：ActivityTaskManagerInternal 的实例，负责 Activity 相关的内部逻辑。
+
+                    //attachApplication：通知 ActivityTaskManager，该进程已就绪。它会：
+                    //遍历所有 Activity 栈，查找是否有因进程不存在而挂起的 ActivityRecord。
+                    //对于找到的 Activity，调用 realStartActivityLocked 启动它。
+                    //返回 true 表示至少有一个 Activity 被启动。
+
+                    //
                     didSomething = mAtmInternal.attachApplication(app.getWindowProcessController());
                 } catch (Exception e) {
                     Slog.wtf(TAG, "Exception thrown launching activities in " + app, e);
@@ -4921,6 +4967,10 @@ public class ActivityManagerService extends IActivityManager.Stub
             // Find any services that should be running in this process...
             if (!badApp) {
                 try {
+                    //ActiveServices 实例，管理所有 Service
+                    //attachApplicationLocked：查找等待在该进程中的 Service：
+                    //检查是否有因进程未启动而延迟启动的 Service（如 START_FLAG_DELAY_START）。
+                    //对于每个匹配的 Service，调用 realStartServiceLocked 启动它
                     didSomething |= mServices.attachApplicationLocked(app, processName);
                     checkTime(startTime, "finishAttachApplicationInner: "
                             + "after mServices.attachApplicationLocked");
@@ -4933,7 +4983,9 @@ public class ActivityManagerService extends IActivityManager.Stub
             // Check if a next-broadcast receiver is in this process...
             if (!badApp) {
                 try {
+                    //处理等待的 BroadcastReceiver
                     for (BroadcastQueue queue : mBroadcastQueues) {
+                        //遍历队列中的广播记录，找到那些目标进程为当前进程且因进程未启动而延迟的广播，并重新调度它们。
                         didSomething |= queue.onApplicationAttachedLocked(app);
                     }
                     checkTime(startTime, "finishAttachApplicationInner: "
@@ -4996,8 +5048,13 @@ public class ActivityManagerService extends IActivityManager.Stub
         }
     }
 
+    /**
+     * 标志着应用进程已完成自身初始化，可以正式处理组件请求
+     * 这个方法是 ActivityManagerService 对外暴露的 Binder 接口方法，由应用进程在完成 ActivityThread.handleBindApplication 后主动调用
+     */
     @Override
     public final void finishAttachApplication(long startSeq) {
+        //获取调用进程的 PID 和 UID
         final int pid = Binder.getCallingPid();
         final int uid = Binder.getCallingUid();
 

@@ -3689,30 +3689,38 @@ public final class ActivityThread extends ClientTransactionHandler
         sendMessage(H.CLEAN_UP_CONTEXT, cci);
     }
 
-    /**  Core implementation of activity launch. */
+    /**  Core implementation of activity launch.
+     * Android 应用进程（ActivityThread）中真正创建 Activity 实例的核心方法。
+     * 它负责从 ActivityClientRecord 中解析信息，通过类加载器创建 Activity 对象，建立上下文环境，并最终调用 onCreate() 生命周期方法
+     * */
     private Activity performLaunchActivity(ActivityClientRecord r, Intent customIntent) {
         ActivityInfo aInfo = r.activityInfo;
         if (r.packageInfo == null) {
+            //根据 ApplicationInfo 加载 APK 信息，包括资源、ClassLoader 等
             r.packageInfo = getPackageInfo(aInfo.applicationInfo, mCompatibilityInfo,
                     Context.CONTEXT_INCLUDE_CODE);
         }
 
         ComponentName component = r.intent.getComponent();
+        //如果 Intent 没有明确指定组件，通过 PackageManager 解析（处理隐式 Intent）
         if (component == null) {
             component = r.intent.resolveActivity(
                 mInitialApplication.getPackageManager());
             r.intent.setComponent(component);
         }
 
+        //如果配置了 targetActivity（如 <activity-alias> 或某些特殊情况），使用目标 Activity
         if (r.activityInfo.targetActivity != null) {
             component = new ComponentName(r.activityInfo.packageName,
                     r.activityInfo.targetActivity);
         }
 
+        //创建 Activity 的基础 ContextImpl
         ContextImpl appContext = createBaseContextForActivity(r);
         Activity activity = null;
         try {
             java.lang.ClassLoader cl = appContext.getClassLoader();
+            //实例化 Activity（核心步骤）
             activity = mInstrumentation.newActivity(
                     cl, component.getClassName(), r.intent);
             StrictMode.incrementExpectedActivityCount(activity.getClass());
@@ -3731,6 +3739,7 @@ public final class ActivityThread extends ClientTransactionHandler
         }
 
         try {
+            //创建 Application 对象
             Application app = r.packageInfo.makeApplicationInner(false, mInstrumentation);
 
             if (localLOGV) Slog.v(TAG, "Performing launch of " + r);
@@ -3744,6 +3753,7 @@ public final class ActivityThread extends ClientTransactionHandler
             // updatePendingActivityConfiguration() reads from mActivities to update
             // ActivityClientRecord which runs in a different thread. Protect modifications to
             // mActivities to avoid race.
+            //以 token 为键存储所有 Activity 记录
             synchronized (mResourcesManager) {
                 mActivities.put(r.token, r);
             }
@@ -3757,6 +3767,7 @@ public final class ActivityThread extends ClientTransactionHandler
                 }
                 if (DEBUG_CONFIGURATION) Slog.v(TAG, "Launching activity "
                         + r.activityInfo.name + " with config " + config);
+                //窗口复用（优化）配置变化导致 Activity 重建时，可以复用之前的 Window。避免重新创建 Window 的开销，保持视觉连续性
                 Window window = null;
                 if (r.mPendingRemoveWindow != null && r.mPreserveWindow) {
                     window = r.mPendingRemoveWindow;
@@ -3766,10 +3777,17 @@ public final class ActivityThread extends ClientTransactionHandler
 
                 // Activity resources must be initialized with the same loaders as the
                 // application context.
+                // 资源加载器传递。确保 Activity 的资源加载器与 Application 一致
                 appContext.getResources().addLoaders(
                         app.getResources().getLoaders().toArray(new ResourcesLoader[0]));
 
                 appContext.setOuterContext(activity);
+                //attach 方法的核心工作
+                //创建 PhoneWindow
+                //设置 WindowManager
+                //关联 Application
+                //初始化 mToken、mIntent 等字段
+                //设置 mUiThread 为主线程
                 activity.attach(appContext, this, getInstrumentation(), r.token,
                         r.ident, app, r.intent, r.activityInfo, title, r.parent,
                         r.embeddedID, r.lastNonConfigurationInstances, config,
@@ -3783,6 +3801,7 @@ public final class ActivityThread extends ClientTransactionHandler
                 checkAndBlockForNetworkAccess();
                 activity.mStartedActivity = false;
                 int theme = r.activityInfo.getThemeResource();
+                //设置主题,主题优先级：Manifest 中声明的主题 > 默认主题
                 if (theme != 0) {
                     activity.setTheme(theme);
                 }
@@ -3792,17 +3811,20 @@ public final class ActivityThread extends ClientTransactionHandler
                     r.mActivityOptions = null;
                 }
                 activity.mLaunchedFromBubble = r.mLaunchedFromBubble;
+                //调用 onCreate（最关键的一步）
                 activity.mCalled = false;
                 // Assigning the activity to the record before calling onCreate() allows
                 // ActivityThread#getActivity() lookup for the callbacks triggered from
                 // ActivityLifecycleCallbacks#onActivityCreated() or
                 // ActivityLifecycleCallback#onActivityPostCreated().
-                r.activity = activity;
+                r.activity = activity;// 提前赋值，便于回调中查找
                 if (r.isPersistable()) {
                     mInstrumentation.callActivityOnCreate(activity, r.state, r.persistentState);
                 } else {
                     mInstrumentation.callActivityOnCreate(activity, r.state);
                 }
+                //activity.mCalled 会在 onCreate() 中被设置为 true（通过 super.onCreate()）
+                //如果开发者在 onCreate() 中没有调用 super.onCreate()，会抛出 SuperNotCalledException
                 if (!activity.mCalled) {
                     throw new SuperNotCalledException(
                         "Activity " + r.intent.getComponent().toShortString() +
@@ -3810,6 +3832,7 @@ public final class ActivityThread extends ClientTransactionHandler
                 }
                 r.mLastReportedWindowingMode = config.windowConfiguration.getWindowingMode();
             }
+            //将 ActivityClientRecord 的状态标记为 ON_CREATE
             r.setState(ON_CREATE);
 
         } catch (SuperNotCalledException e) {
@@ -6749,6 +6772,13 @@ public final class ActivityThread extends ClientTransactionHandler
         return insInfo.nativeLibraryDir;
     }
 
+    /**
+     * handleBindApplication 是 Android 应用进程初始化的核心方法，运行在应用主线程中，由 ActivityThread 在接收到 AMS 的 BIND_APPLICATION 消息时调用。
+     * 它负责将系统服务传递的 AppBindData 转化为应用进程的实际运行环境，包括创建 Application 对象、安装 ContentProvider、初始化调试环境、配置兼容性设置等
+     * 执行线程：始终在主线程执行，确保后续对 UI 组件、Looper 的初始化线程安全。
+     * 核心职责：将进程从“原始 Zygote 进程”转变为“具名应用进程”，准备运行应用代码。
+     * @param data AMS 通过 IApplicationThread.bindApplication 传递的所有信息，如应用信息（ApplicationInfo）、进程名、ContentProvider 列表、Instrumentation 配置、兼容性变更列表等
+     */
     @UnsupportedAppUsage
     private void handleBindApplication(AppBindData data) {
         // Register the UI Thread as a sensitive thread to the runtime.
@@ -6775,6 +6805,7 @@ public final class ActivityThread extends ClientTransactionHandler
         initZipPathValidatorCallback();
 
         mBoundApplication = data;
+        //设置当前配置（屏幕方向、字体缩放等）
         mConfigurationController.setConfiguration(data.config);
         mConfigurationController.setCompatConfiguration(data.config);
         mConfiguration = mConfigurationController.getConfiguration();
@@ -6795,6 +6826,7 @@ public final class ActivityThread extends ClientTransactionHandler
         }
 
         // send up app name; do this *before* waiting for debugger
+        //将进程名从临时值 <pre-initialized> 改为真实进程名（如 com.example.app）。
         Process.setArgV0(data.processName);
         android.ddm.DdmHandleAppName.setAppName(data.processName,
                                                 data.appInfo.packageName,
@@ -6833,11 +6865,13 @@ public final class ActivityThread extends ClientTransactionHandler
          * the spawning of this process. Without doing this this process would have the incorrect
          * system time zone.
          */
+        // 强制系统重新读取当前时区，确保进程内时区与系统一致（避免 Zygote 继承旧值）。
         TimeZone.setDefault(null);
 
         /*
          * Set the LocaleList. This may change once we create the App Context.
          */
+        //设置 LocaleList 默认值为配置中的 locales
         LocaleList.setDefault(data.config.getLocales());
 
         if (Typeface.ENABLE_LAZY_TYPEFACE_INITIALIZATION) {
@@ -6849,6 +6883,7 @@ public final class ActivityThread extends ClientTransactionHandler
             }
         }
 
+        //将 AMS 传递的最新配置应用到 Resources 管理器，确保应用资源（如字符串、尺寸）与系统一致。
         synchronized (mResourcesManager) {
             /*
              * Update the system configuration since its preloaded and might not
@@ -6878,6 +6913,7 @@ public final class ActivityThread extends ClientTransactionHandler
         /**
          * Switch this process to density compatibility mode if needed.
          */
+        //若应用不支持屏幕密度（未声明 FLAG_SUPPORTS_SCREEN_DENSITIES），启用密度兼容模式，强制使用默认密度（160 dpi），并对 Bitmap 设置默认密度。
         if ((data.appInfo.flags&ApplicationInfo.FLAG_SUPPORTS_SCREEN_DENSITIES)
                 == 0) {
             mDensityCompatMode = true;
@@ -6885,8 +6921,10 @@ public final class ActivityThread extends ClientTransactionHandler
         }
         mConfigurationController.updateDefaultDensity(data.config.densityDpi);
 
+        //系统设置与调试配置
         // mCoreSettings is only updated from the main thread, while this function is only called
         // from main thread as well, so no need to lock here.
+        //从核心设置中读取 12/24 小时偏好，设置 DateFormat。
         final String use24HourSetting = mCoreSettings.getString(Settings.System.TIME_12_24);
         Boolean is24Hr = null;
         if (use24HourSetting != null) {
@@ -6927,6 +6965,7 @@ public final class ActivityThread extends ClientTransactionHandler
 
         // Instrumentation info affects the class loader, so load it before
         // setting up the app context.
+        //Instrumentation 准备
         final InstrumentationInfo ii;
         if (data.instrumentationName != null) {
             ii = prepareInstrumentation(data);
@@ -6934,8 +6973,11 @@ public final class ActivityThread extends ClientTransactionHandler
             ii = null;
         }
 
+        //创建应用上下文
+        //创建应用级别的 ContextImpl，基于 LoadedApk（data.info）。此上下文将作为 Application 的基座。
         final IActivityManager mgr = ActivityManager.getService();
         final ContextImpl appContext = ContextImpl.createAppContext(this, data.info);
+        //从应用上下文中提取语言区域列表，更新 ConfigurationController，确保后续配置变更正确处理。
         mConfigurationController.updateLocaleListFromAppContext(appContext);
 
         // Initialize the default http proxy in this process.
@@ -6981,6 +7023,7 @@ public final class ActivityThread extends ClientTransactionHandler
         }
 
         // Continue loading instrumentation.
+        //Instrumentation 与应用对象创建
         if (ii != null) {
             initInstrumentation(ii, data, appContext);
         } else {
@@ -7037,6 +7080,8 @@ public final class ActivityThread extends ClientTransactionHandler
 
             // don't bring up providers in restricted mode; they may depend on the
             // app's custom Application class
+            //ContentProvider 安装
+            //在 Application 创建后、onCreate 调用前安装 provider，确保 provider 可以使用 Application 上下文。
             if (!data.restrictedBackupMode) {
                 if (!ArrayUtils.isEmpty(data.providers)) {
                     installContentProviders(app, data.providers);
@@ -7045,6 +7090,7 @@ public final class ActivityThread extends ClientTransactionHandler
 
             // Do this after providers, since instrumentation tests generally start their
             // test thread at this point, and we don't want that racing.
+            //先调用 Instrumentation 的 onCreate（若存在），再通过 Instrumentation 调用 Application 的 onCreate。这允许 Instrumentation 在应用启动前后注入行为。
             try {
                 mInstrumentation.onCreate(data.instrumentationArgs);
             }
@@ -7093,6 +7139,7 @@ public final class ActivityThread extends ClientTransactionHandler
         }
 
         try {
+            //通知 AMS 应用已完成绑定，AMS 可以继续执行等待该进程的后续操作（如启动 Activity、发布 provider 等）。mStartSeq 用于匹配启动记录。
             mgr.finishAttachApplication(mStartSeq);
         } catch (RemoteException ex) {
             throw ex.rethrowFromSystemServer();
