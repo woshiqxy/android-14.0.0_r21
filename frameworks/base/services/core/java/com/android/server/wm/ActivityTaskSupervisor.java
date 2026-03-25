@@ -925,6 +925,7 @@ public class ActivityTaskSupervisor implements RecentTasks.Callbacks {
 
                 // Create activity launch transaction.
                 //构建 ClientTransaction（核心）
+                // proc.getThread() IApplicationThread (Binder代理)
                 final ClientTransaction clientTransaction = ClientTransaction.obtain(
                         proc.getThread(), r.token);
 
@@ -932,6 +933,7 @@ public class ActivityTaskSupervisor implements RecentTasks.Callbacks {
                 final IBinder fragmentToken = r.getTaskFragment().getFragmentToken();
 
                 final int deviceId = getDeviceIdForDisplayId(r.getDisplayId());
+                // 添加 LaunchActivityItem 作为 Callback
                 clientTransaction.addCallback(LaunchActivityItem.obtain(new Intent(r.intent),
                         System.identityHashCode(r), r.info,
                         // TODO: Have this take the merged configuration instead of separate global
@@ -952,6 +954,7 @@ public class ActivityTaskSupervisor implements RecentTasks.Callbacks {
                 } else {
                     lifecycleItem = PauseActivityItem.obtain();
                 }
+                // 设置最终目标生命周期状态为 RESUMED
                 clientTransaction.setLifecycleStateRequest(lifecycleItem);
 
                 // Schedule transaction.

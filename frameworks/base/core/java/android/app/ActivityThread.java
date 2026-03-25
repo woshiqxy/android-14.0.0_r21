@@ -3849,6 +3849,12 @@ public final class ActivityThread extends ClientTransactionHandler
         return activity;
     }
 
+    /**
+     * handleStartActivity再actvity的启动流程中是自动补齐ON_START状态执行调用的
+     * @param r
+     * @param pendingActions
+     * @param activityOptions
+     */
     @Override
     public void handleStartActivity(ActivityClientRecord r,
             PendingTransactionActions pendingActions, ActivityOptions activityOptions) {
@@ -3866,8 +3872,9 @@ public final class ActivityThread extends ClientTransactionHandler
             activity.mPendingOptions = activityOptions;
         }
 
-        // Start
+        // 1. 调用 onStart()
         activity.performStart("handleStartActivity");
+        // 2. 设置状态
         r.setState(ON_START);
 
         if (pendingActions == null) {
@@ -3876,6 +3883,7 @@ public final class ActivityThread extends ClientTransactionHandler
         }
 
         // Restore instance state
+        // 3. 如果有待恢复的状态，调用 onRestoreInstanceState
         if (pendingActions.shouldRestoreInstanceState()) {
             if (r.isPersistable()) {
                 if (r.state != null || r.persistentState != null) {
@@ -3888,6 +3896,7 @@ public final class ActivityThread extends ClientTransactionHandler
         }
 
         // Call postOnCreate()
+        // 4. 如果有待调用的 postOnCreate
         if (pendingActions.shouldCallOnPostCreate()) {
             activity.mCalled = false;
             Trace.traceBegin(Trace.TRACE_TAG_WINDOW_MANAGER, "onPostCreate");
@@ -3951,6 +3960,7 @@ public final class ActivityThread extends ClientTransactionHandler
 
     /**
      * Extended implementation of activity launch. Used when server requests a launch or relaunch.
+     * AMS中添加的LaunchActivityItem经过ClientTransaction与TransactionExecuteor分装执行，走到当前方法
      */
     @Override
     public Activity handleLaunchActivity(ActivityClientRecord r,

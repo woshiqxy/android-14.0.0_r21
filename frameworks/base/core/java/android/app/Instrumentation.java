@@ -1870,9 +1870,12 @@ public class Instrumentation {
         try {
             intent.migrateExtraStreamToClipData(who);
             intent.prepareToLeaveProcess(who);
+            // ★ 跨进程调用到 system_server
             int result = ActivityTaskManager.getService().startActivity(whoThread,
-                    who.getOpPackageName(), who.getAttributionTag(), intent,
-                    intent.resolveTypeIfNeeded(who.getContentResolver()), token,
+                    who.getOpPackageName(),// 调用方的 ApplicationThread
+                    who.getAttributionTag(),// 调用方包名
+                    intent,// 启动意图
+                    intent.resolveTypeIfNeeded(who.getContentResolver()), token,// 调用方 Activity 的 token
                     target != null ? target.mEmbeddedID : null, requestCode, 0, null, options);
             notifyStartActivityResult(result, options);
             checkStartActivityResult(result, intent);

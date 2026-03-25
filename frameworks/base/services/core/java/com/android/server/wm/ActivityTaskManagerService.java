@@ -1250,6 +1250,7 @@ public class ActivityTaskManagerService extends IActivityTaskManager.Stub {
 
         final SafeActivityOptions opts = SafeActivityOptions.fromBundle(bOptions);
 
+        // 权限检查：强制不允许隔离进程调用
         assertPackageMatchesCallingUid(callingPackage);
         enforceNotIsolatedCaller("startActivityAsUser");
 
@@ -1275,6 +1276,7 @@ public class ActivityTaskManagerService extends IActivityTaskManager.Stub {
                 Binder.getCallingPid(), Binder.getCallingUid(), "startActivityAsUser");
 
         // TODO: Switch to user app stacks here.
+        // 交给 ActivityStarter 处理
         return getActivityStartController().obtainStarter(intent, "startActivityAsUser")
                 .setCaller(caller)
                 .setCallingPackage(callingPackage)
