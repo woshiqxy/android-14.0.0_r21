@@ -2146,8 +2146,10 @@ public class PackageManagerService implements PackageSender, TestUtilityService 
 
             final int[] userIds = mUserManager.getUserIds();
             PackageParser2 packageParser = mInjector.getScanningCachingPackageParser();
+            //扫描系统app
             mOverlayConfig = mInitAppsHelper.initSystemApps(packageParser, packageSettings, userIds,
                     startTime);
+            //扫描data目录下app
             mInitAppsHelper.initNonSystemApps(packageParser, userIds, startTime);
             packageParser.close();
 

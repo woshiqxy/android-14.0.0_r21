@@ -202,6 +202,9 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
 
     /**
      * File storing persisted {@link #mSessions} metadata.
+     *  原子文件操作
+     *  读写操作不会破坏文件完整性
+     *  AtomicFile 维护备份文件
      */
     private final AtomicFile mSessionsFile;
 
@@ -278,11 +281,18 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
                 }
             });
 
+    /**
+     * apk安装远程服务构造函数
+     * @param context
+     * @param pm
+     * @param apexParserSupplier
+     */
     public PackageInstallerService(Context context, PackageManagerService pm,
             Supplier<PackageParser2> apexParserSupplier) {
         mContext = context;
         mPm = pm;
 
+        //子线程
         mInstallThread = new HandlerThread(TAG);
         mInstallThread.start();
 
@@ -293,6 +303,7 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
         mSessionsFile = new AtomicFile(
                 new File(Environment.getDataSystemDirectory(), "install_sessions.xml"),
                 "package-session");
+        //创建安装会话文件目录
         mSessionsDir = new File(Environment.getDataSystemDirectory(), "install_sessions");
         mSessionsDir.mkdirs();
 
@@ -315,15 +326,24 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
         return mOkToSendBroadcasts;
     }
 
+    /**
+     * pms标记已经完成准备，pis进入准备阶段
+     */
     public void systemReady() {
+        //依赖服务初始化
+        //获取应用操作权限管理器
+        //后续安装过程中检查应用权限
         mAppOps = mContext.getSystemService(AppOpsManager.class);
         mStagingManager.systemReady();
         mGentleUpdateHelper.systemReady();
 
         synchronized (mSessions) {
+            //从磁盘读取会话
             readSessionsLocked();
+            //清理过期会话
             expireSessionsLocked();
 
+            //协调分阶段安装
             reconcileStagesLocked(StorageManager.UUID_PRIVATE_INTERNAL);
 
             final ArraySet<File> unclaimedIcons = newArraySet(
@@ -332,6 +352,7 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
             // Ignore stages and icons claimed by active sessions
             for (int i = 0; i < mSessions.size(); i++) {
                 final PackageInstallerSession session = mSessions.valueAt(i);
+                //清理孤儿图标
                 unclaimedIcons.remove(buildAppIconFile(session.sessionId));
             }
 
@@ -355,6 +376,10 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
         mOkToSendBroadcasts = true;
     }
 
+    /**
+     * 恢复等待重启的安装会话
+     * 	分阶段安装会话（Staged Sessions）
+     */
     void restoreAndApplyStagedSessionIfNeeded() {
         List<StagingManager.StagedSession> stagedSessionsToRestore = new ArrayList<>();
         synchronized (mSessions) {
@@ -385,6 +410,10 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
         mStagingManager.restoreSessions(stagedSessionsToRestore, mPm.isDeviceUpgrading());
     }
 
+    /**
+     * 清理孤儿临时目录的关键机制。它负责识别并删除那些没有被任何活跃会话引用的临时目录
+     * @param volumeUuid
+     */
     @GuardedBy("mSessions")
     private void reconcileStagesLocked(String volumeUuid) {
         final ArraySet<File> unclaimedStages = getStagingDirsOnVolume(volumeUuid);
@@ -396,6 +425,11 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
         removeStagingDirs(unclaimedStages);
     }
 
+    /**
+     * 临时目录的位置
+     * @param volumeUuid
+     * @return
+     */
     private ArraySet<File> getStagingDirsOnVolume(String volumeUuid) {
         final File stagingDir = getTmpSessionDir(volumeUuid);
         final ArraySet<File> stagingDirs = newArraySet(stagingDir.listFiles(sStageFilter));
@@ -479,6 +513,28 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
         }
     }
 
+    /**
+     * 负责在系统启动时从磁盘读取之前保存的安装会话信息，实现会话的跨重启持久化
+     * 在系统启动时，从 /data/system/install_sessions.xml 文件中恢复所有未完成的安装会话。
+     * <?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+     * <sessions>
+     *   <session
+     *     sessionId="123"
+     *     userId="0"
+     *     installerUid="10087"
+     *     mode="1"
+     *     installFlags="0"
+     *     installReason="0"
+     *     createdMillis="1700000000000"
+     *     updatedMillis="1700000001000">
+     *     <package name="com.example.app" />
+     *     <appIcon>...</appIcon>
+     *     <permissions>
+     *       <permission name="android.permission.CAMERA" granted="false" />
+     *     </permissions>
+     *   </session>
+     * </sessions>
+     */
     @GuardedBy("mSessions")
     private void readSessionsLocked() {
         if (LOGD) Slog.v(TAG, "readSessionsLocked()");
@@ -523,8 +579,11 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
         }
     }
 
+    //扫描并清理所有过期的安装会话，包括过期的分阶段安装会话和普通会话。
     @GuardedBy("mSessions")
     private void expireSessionsLocked() {
+        //避免在遍历时修改 mSessions 导致并发修改异常
+        //允许在遍历过程中安全地删除会话
         SparseArray<PackageInstallerSession> tmp = mSessions.clone();
         final int n = tmp.size();
         for (int i = 0; i < n; ++i) {
@@ -630,18 +689,29 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
         }
     }
 
+    /**
+     * 创建安装会话时的完整校验和初始化流程
+     * @param params
+     * @param installerPackageName
+     * @param installerAttributionTag
+     * @param userId
+     * @return
+     * @throws IOException
+     */
     private int createSessionInternal(SessionParams params, String installerPackageName,
             String installerAttributionTag, int userId)
             throws IOException {
         final int callingUid = Binder.getCallingUid();
         final Computer snapshot = mPm.snapshotComputer();
+        //跨用户权限检查：确保调用者有权在目标 userId 上创建会话
         snapshot.enforceCrossUserPermission(callingUid, userId, true, true, "createSession");
-
+        //用户限制检查：如果目标用户被策略禁止安装应用（如企业限制），直接拒绝
         if (mPm.isUserRestricted(userId, UserManager.DISALLOW_INSTALL_APPS)) {
             throw new SecurityException("User restriction prevents installing");
         }
-
+        //DataLoader 机制：Android 引入的流式安装技术，允许边下载边安装
         if (params.dataLoaderParams != null
+                //权限要求：只有持有 USE_INSTALLER_V2 权限的应用才能使用 DataLoader（通常是系统安装器或特权应用商店
                 && mContext.checkCallingOrSelfPermission(Manifest.permission.USE_INSTALLER_V2)
                         != PackageManager.PERMISSION_GRANTED) {
             throw new SecurityException("You need the "
@@ -652,7 +722,9 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
         // INSTALL_REASON_ROLLBACK allows an app to be rolled back without requiring the ROLLBACK
         // capability; ensure if this is set as the install reason the app has one of the necessary
         // signature permissions to perform the rollback.
+        //回滚安装：用于应用回退到旧版本（如 Google Play 的自动回滚功能）
         if (params.installReason == PackageManager.INSTALL_REASON_ROLLBACK) {
+            //双重权限检查：需要 MANAGE_ROLLBACKS 或 TEST_MANAGE_ROLLBACKS 权限
             if (mContext.checkCallingOrSelfPermission(Manifest.permission.MANAGE_ROLLBACKS)
                     != PackageManager.PERMISSION_GRANTED &&
                     mContext.checkCallingOrSelfPermission(Manifest.permission.TEST_MANAGE_ROLLBACKS)
@@ -665,6 +737,9 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
 
         // App package name and label length is restricted so that really long strings aren't
         // written to disk.
+        // 参数清理与截断
+        // 安全防护：防止超长包名或标签导致的问题
+        // MAX_SAFE_LABEL_LENGTH：通常为 1000 字符，避免恶意应用填充巨型数据
         if (params.appPackageName != null
                 && params.appPackageName.length() > SessionParams.MAX_PACKAGE_NAME_LENGTH) {
             params.appPackageName = null;
@@ -677,6 +752,9 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
                 && params.installerPackageName.length() < SessionParams.MAX_PACKAGE_NAME_LENGTH)
                 ? params.installerPackageName : installerPackageName;
 
+        //调用者身份处理
+        //ADB/Shell 安装
+        //ADB 安装：设置 INSTALL_FROM_ADB 标志，强制安装器包名为 "com.android.shell"
         if (PackageManagerServiceUtils.isRootOrShell(callingUid)
                 || PackageInstallerSession.isSystemDataLoaderInstallation(params)
                 || PackageManagerServiceUtils.isAdoptedShell(callingUid, mContext)) {
@@ -685,12 +763,15 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
             // initiatingPackageName
             installerPackageName = SHELL_PACKAGE_NAME;
         } else {
+            //普通应用安装
+            //强制匹配：确保 installerPackageName 与调用者 UID 一致
             if (callingUid != Process.SYSTEM_UID) {
                 // The supplied installerPackageName must always belong to the calling app.
                 mAppOps.checkPackage(callingUid, installerPackageName);
             }
             // Only apps with INSTALL_PACKAGES are allowed to set an installer that is not the
             // caller.
+            //特权覆盖：只有持有 INSTALL_PACKAGES 权限的应用才能指定不同的安装器
             if (!TextUtils.equals(requestedInstallerPackageName, installerPackageName)) {
                 if (mContext.checkCallingOrSelfPermission(Manifest.permission.INSTALL_PACKAGES)
                         != PackageManager.PERMISSION_GRANTED) {
@@ -742,8 +823,10 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
             params.installFlags &= ~PackageManager.INSTALL_DISABLE_VERIFICATION;
         }
 
+        //APEX 专项检查,更新范围检查：控制是否绕过允许的 APEX 更新检查
         boolean isApex = (params.installFlags & PackageManager.INSTALL_APEX) != 0;
         if (isApex) {
+            //APEX 更新权限：需要 INSTALL_PACKAGE_UPDATES 或 INSTALL_PACKAGES 权限
             if (mContext.checkCallingOrSelfPermission(Manifest.permission.INSTALL_PACKAGE_UPDATES)
                     == PackageManager.PERMISSION_DENIED
                     && mContext.checkCallingOrSelfPermission(Manifest.permission.INSTALL_PACKAGES)
@@ -755,6 +838,7 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
         }
 
         if (isApex) {
+            //硬件支持：检查设备是否支持 APEX 模块
             if (!mApexManager.isApexSupported()) {
                 throw new IllegalArgumentException(
                     "This device doesn't support the installation of APEX files");
@@ -877,6 +961,10 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
             }
         }
 
+        //会话数量限制
+        //有权限应用：MAX_ACTIVE_SESSIONS_WITH_PERMISSION (通常是 100)
+        //普通应用：MAX_ACTIVE_SESSIONS_NO_PERMISSION (通常是 50)
+        //历史会话限制：MAX_HISTORICAL_SESSIONS (1000)，防止累积过多记录
         final int sessionId;
         final PackageInstallerSession session;
         synchronized (mSessions) {
@@ -903,7 +991,10 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
 
         final long createdMillis = System.currentTimeMillis();
         // We're staging to exactly one location
+        //创建物理存储目录
+        //stageDir：内部存储路径 /data/app/vmdl-<sessionId>.tmp
         File stageDir = null;
+        //stageCid：外部存储容器 ID（用于 adopted storage）
         String stageCid = null;
         if (!params.isMultiPackage) {
             if ((params.installFlags & PackageManager.INSTALL_INTERNAL) != 0) {
@@ -939,9 +1030,15 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
             params.installFlags &= ~PackageManager.INSTALL_REQUEST_UPDATE_OWNERSHIP;
         }
 
+        //安装源信息构建
+        //installerPackageName：发起安装的应用
+        //originatingPackageName：来源应用（如浏览器下载的APK）
+        //requestedInstallerPackageName：请求的安装器
+        //installerAttributionTag：归因标签（隐私增强）
         InstallSource installSource = InstallSource.create(installerPackageName,
                 originatingPackageName, requestedInstallerPackageName, requestedInstallerPackageUid,
                 requestedInstallerPackageName, installerAttributionTag, params.packageSource);
+        // 创建 Session 对象并返回
         session = new PackageInstallerSession(mInternalCallback, mContext, mPm, this,
                 mSilentUpdatePolicy, mInstallThread.getLooper(), mStagingManager, sessionId,
                 userId, callingUid, installSource, params, createdMillis, 0L, stageDir, stageCid,
@@ -966,15 +1063,34 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
         return SystemConfig.getInstance().getWhitelistedStagedInstallers().contains(installerName);
     }
 
+    /**
+     * 动态更新待安装应用的图标
+     * 应用商店预加载：在下载完成前就显示应用图标
+     * 动态图标更新：A/B 测试不同的图标版本
+     * @param sessionId
+     * @param appIcon
+     */
     @Override
     public void updateSessionAppIcon(int sessionId, Bitmap appIcon) {
+        //双重保护机制：
+        //synchronized	防止并发修改导致数据竞争、状态不一致
         synchronized (mSessions) {
+            //验证会话存在性否则操作无效会话
             final PackageInstallerSession session = mSessions.get(sessionId);
+            //验证所有权
             if (session == null || !isCallingUidOwner(session)) {
                 throw new SecurityException("Caller has no access to session " + sessionId);
             }
 
             // Defensively resize giant app icons
+            //图标智能缩放
+            //为什么需要缩放？
+            //防止恶意应用上传超大图标导致内存溢出
+            //节省系统资源（图标会被持久化到磁盘）
+            //确保 UI 显示一致性
+            //阈值为什么是 2 倍？
+            //允许一定程度的超采样，保持图标质量
+            //超过 2 倍时，缩放到标准大小节省资源
             if (appIcon != null) {
                 final ActivityManager am = (ActivityManager) mContext.getSystemService(
                         Context.ACTIVITY_SERVICE);
@@ -986,12 +1102,19 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
             }
 
             session.params.appIcon = appIcon;
+            //表示图标来自 API 设置，而非从 APK 解析
+            //在最终安装时，系统会优先使用 APK 内的图标，但安装过程中的 UI 可以使用这个临时图标
             session.params.appIconLastModified = -1;
 
             mInternalCallback.onSessionBadgingChanged(session);
         }
     }
 
+    /**
+     * 动态更新待安装应用的名称
+     * @param sessionId
+     * @param appLabel
+     */
     @Override
     public void updateSessionAppLabel(int sessionId, String appLabel) {
         synchronized (mSessions) {
@@ -1006,6 +1129,10 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
         }
     }
 
+    /**
+     * 放弃一个未完成的会话
+     * @param sessionId
+     */
     @Override
     public void abandonSession(int sessionId) {
         synchronized (mSessions) {
@@ -1016,6 +1143,7 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
             session.abandon();
         }
     }
+
 
     @Override
     public IPackageInstallerSession openSession(int sessionId) {
@@ -1030,9 +1158,11 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
         if (session == null) {
             return false;
         }
+        // // 1. 会话所有者可以直接打开
         if (isCallingUidOwner(session)) {
             return true;
         }
+        // // 2. 系统权限可以打开任何会话
         // Package verifiers have access to openSession for sealed sessions.
         if (session.isSealed() && mContext.checkCallingOrSelfPermission(
                 android.Manifest.permission.PACKAGE_VERIFICATION_AGENT)
@@ -1042,6 +1172,12 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
         return false;
     }
 
+    /**
+     * openSessionInternal 是 IPackageInstaller.openSession() AIDL 方法的实现，它的核心作用是将一个会话 ID 转化为可写入数据的会话对象。
+     * @param sessionId
+     * @return
+     * @throws IOException
+     */
     private IPackageInstallerSession openSessionInternal(int sessionId) throws IOException {
         synchronized (mSessions) {
             final PackageInstallerSession session = mSessions.get(sessionId);
@@ -1107,6 +1243,11 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
         return result;
     }
 
+    /**
+     * 这是最关键的底层操作，准备文件写入的临时目录：
+     * @param stageDir
+     * @throws IOException
+     */
     static void prepareStageDir(File stageDir) throws IOException {
         if (stageDir.exists()) {
             throw new IOException("Session dir already exists: " + stageDir);
@@ -1146,6 +1287,11 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
                 && !snapshot.canQueryPackage(uid, info.getAppPackageName());
     }
 
+    /**
+     * 获取单个会话的详细信息（进度、状态等）
+     * @param sessionId
+     * @return
+     */
     @Override
     public SessionInfo getSessionInfo(int sessionId) {
         final int callingUid = Binder.getCallingUid();
@@ -1176,6 +1322,11 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
         return new ParceledListSlice<>(result);
     }
 
+    /**
+     * 获取当前所有活跃的session会话
+     * @param userId
+     * @return
+     */
     @Override
     public ParceledListSlice<SessionInfo> getAllSessions(int userId) {
         final int callingUid = Binder.getCallingUid();
@@ -1196,11 +1347,22 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
         return new ParceledListSlice<>(result);
     }
 
+    /**
+     * 返回指定安装器包名在当前用户下创建的所有活跃会话
+     * 应用商店启动时：恢复之前未完成的下载任务
+     * 管理多个下载：显示所有正在进行的安装进度
+     * 调试和监控：开发者查看自己的活跃会话
+     * @param installerPackageName
+     * @param userId
+     * @return
+     */
     @Override
     public ParceledListSlice<SessionInfo> getMySessions(String installerPackageName, int userId) {
         final Computer snapshot = mPm.snapshotComputer();
         final int callingUid = Binder.getCallingUid();
+        //防止访问其他用户的会话
         snapshot.enforceCrossUserPermission(callingUid, userId, true, false, "getMySessions");
+        //确保 installerPackageName 与 UID 匹配
         mAppOps.checkPackage(callingUid, installerPackageName);
 
         final List<SessionInfo> result = new ArrayList<>();
@@ -1210,8 +1372,11 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
 
                 SessionInfo info =
                         session.generateInfoForCaller(false /*withIcon*/, Process.SYSTEM_UID);
+                //安装器包名匹配
                 if (Objects.equals(info.getInstallerPackageName(), installerPackageName)
+                        //用户ID匹配,不是子会话
                         && session.userId == userId && !session.hasParentSessionId()
+                        //所有权验证
                         && isCallingUidOwner(session)) {
                     result.add(info);
                 }
@@ -1223,28 +1388,37 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
     @Override
     public void uninstall(VersionedPackage versionedPackage, String callerPackageName, int flags,
                 IntentSender statusReceiver, int userId) {
+        //基础权限检查
         final Computer snapshot = mPm.snapshotComputer();
         final int callingUid = Binder.getCallingUid();
+        //防止卸载其他用户的应用
         snapshot.enforceCrossUserPermission(callingUid, userId, true, true, "uninstall");
         if (!PackageManagerServiceUtils.isRootOrShell(callingUid)) {
+            //确保 callerPackageName 与 UID 匹配
             mAppOps.checkPackage(callingUid, callerPackageName);
         }
 
         // Check whether the caller is device owner or affiliated profile owner, in which case we do
         // it silently.
+        //设备所有者检查,这些特权应用可以静默卸载应用，无需用户确认
         DevicePolicyManagerInternal dpmi =
                 LocalServices.getService(DevicePolicyManagerInternal.class);
         final boolean canSilentlyInstallPackage =
                 dpmi != null && dpmi.canSilentlyInstallPackage(callerPackageName, callingUid);
 
+        //用户确认后，结果通过回调返回
         final PackageDeleteObserverAdapter adapter = new PackageDeleteObserverAdapter(mContext,
                 statusReceiver, versionedPackage.getPackageName(),
                 canSilentlyInstallPackage, userId);
         if (mContext.checkCallingOrSelfPermission(android.Manifest.permission.DELETE_PACKAGES)
                     == PackageManager.PERMISSION_GRANTED) {
             // Sweet, call straight through!
+            //直接卸载（有DELETE_PACKAGES权限）,特点：立即执行，无用户交互
+            //系统应用
+            //ADB Shell
+            //预置的特权应用
             mPm.deletePackageVersioned(versionedPackage, adapter.getBinder(), userId, flags);
-        } else if (canSilentlyInstallPackage) {
+        } else if (canSilentlyInstallPackage) {//设备所有者静默卸载
             // Allow the device owner and affiliated profile owner to silently delete packages
             // Need to clear the calling identity to get DELETE_PACKAGES permission
             final long ident = Binder.clearCallingIdentity();
@@ -1258,13 +1432,17 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
                     .setAdmin(callerPackageName)
                     .write();
         } else {
+            //普通应用 - 用户确认卸载
             ApplicationInfo appInfo = snapshot.getApplicationInfo(callerPackageName, 0, userId);
+            //如果应用 target >= P，必须持有 REQUEST_DELETE_PACKAGES 权限
             if (appInfo.targetSdkVersion >= Build.VERSION_CODES.P) {
+                //这是 Android 8.0 引入的权限，防止应用随意请求卸载其他应用
                 mContext.enforceCallingOrSelfPermission(Manifest.permission.REQUEST_DELETE_PACKAGES,
                         null);
             }
 
             // Take a short detour to confirm with user
+            //这个 Intent 会触发系统卸载确认界面
             final Intent intent = new Intent(Intent.ACTION_UNINSTALL_PACKAGE);
             intent.setData(Uri.fromParts("package", versionedPackage.getPackageName(), null));
             intent.putExtra(PackageInstaller.EXTRA_CALLBACK,
@@ -1273,6 +1451,13 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
         }
     }
 
+    /**
+     * 只能卸载系统中已存在的包（主要是系统预置应用），且只能恢复到出厂版本。
+     * @param versionedPackage
+     * @param callerPackageName
+     * @param statusReceiver
+     * @param userId
+     */
     @Override
     public void uninstallExistingPackage(VersionedPackage versionedPackage,
             String callerPackageName, IntentSender statusReceiver, int userId) {
@@ -1289,6 +1474,15 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
         mPm.deleteExistingPackageAsUser(versionedPackage, adapter.getBinder(), userId);
     }
 
+    /**
+     * 用于激活系统中已存在但未安装的应用的特殊方法
+     * @param packageName
+     * @param installFlags
+     * @param installReason
+     * @param statusReceiver
+     * @param userId
+     * @param allowListedPermissions
+     */
     @Override
     public void installExistingPackage(String packageName, int installFlags, int installReason,
             IntentSender statusReceiver, int userId, List<String> allowListedPermissions) {
@@ -1304,6 +1498,11 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
         }
     }
 
+    /**
+     * 用于处理应用安装过程中的权限确认结果
+     * @param sessionId
+     * @param accepted
+     */
     @Override
     public void setPermissionsResult(int sessionId, boolean accepted) {
         mContext.enforceCallingOrSelfPermission(android.Manifest.permission.INSTALL_PACKAGES, TAG);
