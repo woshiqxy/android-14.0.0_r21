@@ -178,11 +178,19 @@ public class TransactionExecutor {
 
         // Cycle to the state right before the final requested state.
         // ★ 关键：cycleToPath 自动补齐中间状态
+        // ★ 计算中间路径
+        // 当前: ON_CREATE(1), 目标: ON_RESUME(3), excludeLast=true
+        // 路径: [ON_START(2)]
+        // 执行中间路径 → handleStartActivity() → onStart()
         cycleToPath(r, lifecycleItem.getTargetState(), true /* excludeLastState */, transaction);
 
         // Execute the final transition with proper parameters.
+        // ★ 执行最终目标状态
         lifecycleItem.execute(mTransactionHandler, token, mPendingActions);
+        // → ResumeActivityItem.execute() → handleResumeActivity() → onResume()
+
         lifecycleItem.postExecute(mTransactionHandler, token, mPendingActions);
+        // → 通知 ATMS Activity 已经 resumed
     }
 
     /** Transition the client between states. */

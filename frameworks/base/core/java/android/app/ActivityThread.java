@@ -3694,6 +3694,7 @@ public final class ActivityThread extends ClientTransactionHandler
      * 它负责从 ActivityClientRecord 中解析信息，通过类加载器创建 Activity 对象，建立上下文环境，并最终调用 onCreate() 生命周期方法
      * */
     private Activity performLaunchActivity(ActivityClientRecord r, Intent customIntent) {
+        // 1. 获取 ActivityInfo 和 ComponentName
         ActivityInfo aInfo = r.activityInfo;
         if (r.packageInfo == null) {
             //根据 ApplicationInfo 加载 APK 信息，包括资源、ClassLoader 等
@@ -3715,14 +3716,16 @@ public final class ActivityThread extends ClientTransactionHandler
                     r.activityInfo.targetActivity);
         }
 
-        //创建 Activity 的基础 ContextImpl
+        // 2. 创建 Context
         ContextImpl appContext = createBaseContextForActivity(r);
         Activity activity = null;
         try {
             java.lang.ClassLoader cl = appContext.getClassLoader();
-            //实例化 Activity（核心步骤）
+            // 3. ★ 通过 Instrumentation 反射创建 Activity 实例
             activity = mInstrumentation.newActivity(
                     cl, component.getClassName(), r.intent);
+            // 内部：(Activity) cl.loadClass(className).newInstance()
+
             StrictMode.incrementExpectedActivityCount(activity.getClass());
             r.intent.setExtrasClassLoader(cl);
             r.intent.prepareToEnterProcess(isProtectedComponent(r.activityInfo),
@@ -3739,7 +3742,7 @@ public final class ActivityThread extends ClientTransactionHandler
         }
 
         try {
-            //创建 Application 对象
+            // 4. 获取或创建 Application 对象
             Application app = r.packageInfo.makeApplicationInner(false, mInstrumentation);
 
             if (localLOGV) Slog.v(TAG, "Performing launch of " + r);
@@ -3788,11 +3791,16 @@ public final class ActivityThread extends ClientTransactionHandler
                 //关联 Application
                 //初始化 mToken、mIntent 等字段
                 //设置 mUiThread 为主线程
+                // 5. ★ 调用 Activity.attach() — 初始化 Activity 核心成员
                 activity.attach(appContext, this, getInstrumentation(), r.token,
                         r.ident, app, r.intent, r.activityInfo, title, r.parent,
                         r.embeddedID, r.lastNonConfigurationInstances, config,
                         r.referrer, r.voiceInteractor, window, r.activityConfigCallback,
                         r.assistToken, r.shareableActivityToken);
+                // attach 内部：
+                //   - 创建 PhoneWindow
+                //   - 设置 WindowManager
+                //   - 设置 mToken / mComponent 等
 
                 if (customIntent != null) {
                     activity.mIntent = customIntent;
@@ -3802,6 +3810,8 @@ public final class ActivityThread extends ClientTransactionHandler
                 activity.mStartedActivity = false;
                 int theme = r.activityInfo.getThemeResource();
                 //设置主题,主题优先级：Manifest 中声明的主题 > 默认主题
+
+                // 6. 设置主题
                 if (theme != 0) {
                     activity.setTheme(theme);
                 }
@@ -3818,11 +3828,16 @@ public final class ActivityThread extends ClientTransactionHandler
                 // ActivityLifecycleCallbacks#onActivityCreated() or
                 // ActivityLifecycleCallback#onActivityPostCreated().
                 r.activity = activity;// 提前赋值，便于回调中查找
+                // 7. ★★★ 调用 Activity.onCreate() ★★★
                 if (r.isPersistable()) {
                     mInstrumentation.callActivityOnCreate(activity, r.state, r.persistentState);
                 } else {
                     mInstrumentation.callActivityOnCreate(activity, r.state);
-                }
+                } // 内部：
+                //   activity.performCreate(icicle)
+                //     → Activity.onCreate(savedInstanceState)
+                //       → 开发者的代码: setContentView() 等
+
                 //activity.mCalled 会在 onCreate() 中被设置为 true（通过 super.onCreate()）
                 //如果开发者在 onCreate() 中没有调用 super.onCreate()，会抛出 SuperNotCalledException
                 if (!activity.mCalled) {
@@ -3833,6 +3848,7 @@ public final class ActivityThread extends ClientTransactionHandler
                 r.mLastReportedWindowingMode = config.windowConfiguration.getWindowingMode();
             }
             //将 ActivityClientRecord 的状态标记为 ON_CREATE
+            // 8. 更新状态为 ON_CREATE
             r.setState(ON_CREATE);
 
         } catch (SuperNotCalledException e) {
@@ -5066,6 +5082,7 @@ public final class ActivityThread extends ClientTransactionHandler
 
         // TODO Push resumeArgs into the activity for consideration
         // skip below steps for double-resume and r.mFinish = true case.
+        // ★ 执行 onResume
         if (!performResumeActivity(r, finalStateRequest, reason)) {
             return;
         }
@@ -5095,6 +5112,7 @@ public final class ActivityThread extends ClientTransactionHandler
             willBeVisible = ActivityClient.getInstance().willActivityBeVisible(
                     a.getActivityToken());
         }
+        // ★★ 将 DecorView 添加到 WindowManager → 触发渲染 ★★
         if (r.window == null && !a.mFinished && willBeVisible) {
             r.window = r.activity.getWindow();
             View decor = r.window.getDecorView();
@@ -5119,7 +5137,14 @@ public final class ActivityThread extends ClientTransactionHandler
             if (a.mVisibleFromClient) {
                 if (!a.mWindowAdded) {
                     a.mWindowAdded = true;
+                    // ★★★ 关键！添加 DecorView 到 WindowManager ★★★
                     wm.addView(decor, l);
+                    // → WindowManagerImpl.addView()
+                    //   → WindowManagerGlobal.addView()
+                    //     → 创建 ViewRootImpl
+                    //     → ViewRootImpl.setView(decorView, ...)
+                    //       → 通过 Session 将 Window 添加到 WMS
+                    //       → requestLayout() → 触发 measure/layout/draw
                 } else {
                     // The activity will get a callback for this {@link LayoutParams} change
                     // earlier. However, at that time the decor will not be set (this is set
@@ -5162,8 +5187,10 @@ public final class ActivityThread extends ClientTransactionHandler
 
             r.activity.mVisibleFromServer = true;
             mNumVisibleActivities++;
+            // 使 Activity 可见
             if (r.activity.mVisibleFromClient) {
                 r.activity.makeVisible();
+                // → mDecor.setVisibility(View.VISIBLE)
             }
 
             if (shouldSendCompatFakeFocus) {
@@ -5179,6 +5206,7 @@ public final class ActivityThread extends ClientTransactionHandler
 
         mNewActivities.add(r);
         if (localLOGV) Slog.v(TAG, "Scheduling idle handler for " + r);
+        // ★ 添加 IdleHandler（空闲时清理 stop 上一个 Activity 等）
         Looper.myQueue().addIdleHandler(new Idler());
     }
 
@@ -7069,6 +7097,9 @@ public final class ActivityThread extends ClientTransactionHandler
             // If the app is being launched for full backup or restore, bring it up in
             // a restricted environment with the base application class.
             app = data.info.makeApplicationInner(data.restrictedBackupMode, null);
+            // data.info 就是主 APK 的 LoadedApk
+            // mApplication == null → 创建 Application 实例
+            // mApplication = app   → 缓存起来
 
             // Propagate autofill compat state
             app.setAutofillOptions(data.autofillOptions);
@@ -7111,6 +7142,7 @@ public final class ActivityThread extends ClientTransactionHandler
             }
             try {
                 mInstrumentation.callApplicationOnCreate(app);
+                // → Application.onCreate()
             } catch (Exception e) {
                 if (!mInstrumentation.onException(app, e)) {
                     throw new RuntimeException(

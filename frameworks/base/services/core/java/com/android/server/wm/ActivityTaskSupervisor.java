@@ -1088,7 +1088,7 @@ public class ActivityTaskSupervisor implements RecentTasks.Callbacks {
         if (wpc != null && wpc.hasThread()) {
             try {
                 //尝试直接启动 Activity（realStartActivityLocked）
-                realStartActivityLocked(r, wpc, andResume, checkConfig);
+                    realStartActivityLocked(r, wpc, andResume, checkConfig);
                 return;
             } catch (RemoteException e) {
                 Slog.w(TAG, "Exception when starting activity "

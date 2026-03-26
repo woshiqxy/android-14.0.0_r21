@@ -1408,6 +1408,7 @@ class TaskFragment extends WindowContainer<WindowContainer> {
 
         mTaskSupervisor.mNoAnimActivities.clear();
 
+        // 检查目标 Activity 所在进程是否已启动
         if (next.attachedToProcess()) {
             if (DEBUG_SWITCH) {
                 Slog.v(TAG_SWITCH, "Resume running: " + next + " stopped=" + next.mAppStopped
@@ -1517,7 +1518,7 @@ class TaskFragment extends WindowContainer<WindowContainer> {
                 mAtmService.getAppWarningsLocked().onResumeActivity(next);
                 next.app.setPendingUiCleanAndForceProcessStateUpTo(mAtmService.mTopProcessState);
                 next.abortAndClearOptionsAnimation();
-                //// 设置生命周期请求
+                // 设置生命周期请求
                 transaction.setLifecycleStateRequest(
                         ResumeActivityItem.obtain(next.app.getReportedProcState(),
                                 dc.isNextTransitionForward(), next.shouldSendCompatFakeFocus()));
