@@ -8515,6 +8515,7 @@ public class Activity extends ContextThemeWrapper
         mFragments.attachHost(null /*parent*/);
         mActivityInfo = info;
 
+        //应用窗口的根实现，窗口显示的本体
         mWindow = new PhoneWindow(this, window, activityConfigCallback);
         mWindow.setWindowControllerCallback(mWindowControllerCallback);
         mWindow.setCallback(this);
